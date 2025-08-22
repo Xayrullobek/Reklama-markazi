@@ -1,3 +1,4 @@
+# main.py
 import os
 import re
 from datetime import datetime
@@ -8,19 +9,19 @@ import telebot
 from telebot import types
 from openpyxl import Workbook
 
-# ================== KONFIG (token/ID seniki bilan) ==================
+# ================== KONFIG (ENV orqali boshqariladi) ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8428384522:AAE0bMRykoO3Edyw6R7Y1oGYN36ViM-2Qk0")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6988170724"))
 
-# Render URL: https://APPNAME.onrender.com  (seniki)
-WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "https://telegram-bott-ejvk.onrender.com")
+# Render URL: https://APPNAME.onrender.com (ENVga o'zingnikini qo'y)
+WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "https://SENING-APPING.onrender.com")
 WEBHOOK_PATH = "/" + BOT_TOKEN
 WEBHOOK_URL = WEBHOOK_BASE + WEBHOOK_PATH
 
 # Ruxsat etilgan fayl turlari
 ALLOWED_EXT = (".jpg", ".jpeg", ".tif", ".tiff")
 
-# Standart narxlar (so'm / m²) — admin o'zgartiradi
+# Standart narxlar (so'm / m²) — admin o'zgartira oladi
 DEFAULT_PRICES = {
     "banner": 45000,
     "qora_banner": 55000,
@@ -38,23 +39,24 @@ WAGE_RATE = 1500
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# ===== In-memory ma'lumotlar =====
+# ===== In-memory ma'lumotlar (demo) =====
 admins = {ADMIN_ID}                      # adminlar to'plami
 users = {}                               # user_id -> {phone, tg_name, username}
 display_names = {}                       # user_id -> faqat admin ko'radigan nom
 prices = DEFAULT_PRICES.copy()           # global narxlar
-user_price_overrides = {}                # user_id -> {type: price}
+user_price_overrides = {}                # user_id -> {type: price} (mijozga xos narxlar)
 debts = {}                               # user_id -> qarz summasi
-orders = []                              # yakuniy buyurtmalar (hisobot uchun)
+orders = []                              # barcha buyurtmalar ro'yxati (hisobot uchun)
 
-# Sessiya (buyurtma) konteksti
+# Sessiyalar: foydalanuvchi holati (buyurtma konteksti)
 user_state = {}                          # user_id -> {"section": ..., "sub": ..., "await": ...}
-session_items = {}                       # user_id -> [ {record...} ]  (finish bosilgunga qadar)
+session_items = {}                       # user_id -> [ {record...} ]  (finish bosilgunga qadar to'planadigan fayllar)
 
 # ======== YORDAMCHI FUNKSIYALAR ========
 
 def is_image_filename(name: str) -> bool:
-    return name.lower().endswith(ALLOWED_EXT)
+    n = name.lower()
+    return n.endswith(ALLOWED_EXT)
 
 def fmt_user_name(uid: int) -> str:
     base = users.get(uid, {})
@@ -76,29 +78,44 @@ def ensure_user_exists(msg):
     return uid
 
 def get_effective_price(user_id: int, otype: str) -> int:
-    if user_id in user_price_overrides and otype in user_price_overrides[user_id]:
-        return user_price_overrides[user_id][otype]
-    return prices.get(otype, 0)
+    key = otype.lower().replace(" ", "_")
+    if user_id in user_price_overrides and key in user_price_overrides[user_id]:
+        return user_price_overrides[user_id][key]
+    return prices.get(key, 0)
 
 def parse_qty(text: str) -> int:
+    """
+    Fayl nomidan sonini topish: '4ta', '4 dona', '4x', '4', '2- dona' va hok.
+    Birinchi uchragan butun son sifatida qabul qilamiz.
+    """
     m = re.search(r'(\d+)\s*(ta|dona|x)?\b', text.lower())
     if m:
         try:
-            return max(1, int(m.group(1)))
+            v = int(m.group(1))
+            return max(1, v)
         except:
             return 1
     return 1
 
 def parse_wh(text: str):
+    """
+    Eni x bo'yi (sm) — '150x200', '150 X 200', '150*200', '150-200', '150,200'
+    """
     m = re.search(r'(\d+(?:\.\d+)?)\s*[,x\-\*]\s*(\d+(?:\.\d+)?)', text.lower())
     if m:
         try:
-            return float(m.group(1)), float(m.group(2))
+            w = float(m.group(1))
+            h = float(m.group(2))
+            return w, h
         except:
             return None, None
     return None, None
 
 def parse_length(text: str):
+    """
+    Uzunlik (sm) — '300', '300sm', '300 cm'
+    Birinchi uchraydigan sonni olamiz.
+    """
     m = re.search(r'(\d+(?:\.\d+)?)\s*(sm|cm)?\b', text.lower())
     if m:
         try:
@@ -108,17 +125,22 @@ def parse_length(text: str):
     return None
 
 def add_final_order_record(user_id: int, record: dict):
+    """
+    Yakuniy buyurtmalar (orders) ga yozish va qarzni yangilash.
+    record tarkibi:
+      {type, sub, file_name, width_cm, height_cm, length_cm, qty, area_m2, unit_price, price_sum, date}
+    """
     orders.append({
         "user_id": user_id,
-        "type": record["type"],     # ko'rinadigan nom
-        "sub": record["sub"],       # None | '1.07'...
+        "type": record["type"],
+        "sub": record["sub"],
         "file": record["file_name"],
         "width_cm": record["width_cm"],
         "height_cm": record["height_cm"],
         "length_cm": record["length_cm"],
         "qty": record["qty"],
         "area": round(record["area_m2"], 4),
-        "unit_price": record["unit_price"],   # qo'shdik: hisobotda ko'rsatish uchun
+        "unit_price": int(record["unit_price"]),
         "price": int(record["price_sum"]),
         "date": record["date"]
     })
@@ -146,10 +168,12 @@ def show_order_menu(chat_id: int):
         types.InlineKeyboardButton("🟩 Matoviy Orakal", callback_data="o:matoviy_orakal"),
         types.InlineKeyboardButton("🟥 Setka", callback_data="o:setka"),
     )
+    # Sessiya uchun "Pechatga berish" tugmasi ham ko'rsatamiz
     kb.add(types.InlineKeyboardButton("📤 Pechatga berish", callback_data="order:finish"))
     bot.send_message(chat_id, "🛒 Buyurtma bo‘limini tanlang:", reply_markup=kb)
 
 def show_sub_menu_for_roll(chat_id: int, section_key: str):
+    # 1.07 / 1.27 / 1.52 / Kichik
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("1.07", callback_data=f"s:{section_key}:1.07"),
@@ -157,6 +181,7 @@ def show_sub_menu_for_roll(chat_id: int, section_key: str):
         types.InlineKeyboardButton("1.52", callback_data=f"s:{section_key}:1.52"),
         types.InlineKeyboardButton("Kichik", callback_data=f"s:{section_key}:kichik"),
     )
+    # Sessiya uchun "Pechatga berish"
     kb.add(types.InlineKeyboardButton("📤 Pechatga berish", callback_data="order:finish"))
     bot.send_message(chat_id, "Turini tanlang:", reply_markup=kb)
 
@@ -173,8 +198,10 @@ def write_excel_for_items(items: list) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "Buyurtma"
-    ws.append(["Turi", "Pastki tur", "Fayl", "Eni (cm)", "Boyi (cm)", "Uzunlik (cm)",
-               "Soni", "Maydon (m²)", "Birlik narx (so‘m/m²)", "Jami (so‘m)", "Sana"])
+    ws.append([
+        "Turi", "Pastki tur", "Fayl", "Eni (cm)", "Boyi (cm)", "Uzunlik (cm)",
+        "Soni", "Maydon (m²)", "Narx (so‘m/m²)", "Summa (so‘m)", "Sana"
+    ])
     for it in items:
         ws.append([
             it["type"],
@@ -189,6 +216,10 @@ def write_excel_for_items(items: list) -> BytesIO:
             int(it["price_sum"]),
             it["date"]
         ])
+    # Jami qatori
+    total_area = sum(x["area_m2"] for x in items)
+    total_sum = sum(x["price_sum"] for x in items)
+    ws.append(["", "", "", "", "", "", "Jami:", round(total_area, 4), "", int(total_sum), ""])
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
@@ -198,9 +229,11 @@ def write_excel_for_range(rows: list) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "Hisobot"
-    ws.append(["User ID", "Ko‘rinadigan nom", "Turi", "Pastki tur", "Fayl",
-               "Eni (cm)", "Boyi (cm)", "Uzunlik (cm)", "Soni",
-               "Maydon (m²)", "Birlik narx (so‘m/m²)", "Jami (so‘m)", "Sana"])
+    ws.append([
+        "User ID", "Ko‘rinadigan nom", "Turi", "Pastki tur", "Fayl",
+        "Eni (cm)", "Boyi (cm)", "Uzunlik (cm)", "Soni",
+        "Maydon (m²)", "Narx (so‘m/m²)", "Summa (so‘m)", "Sana"
+    ])
     for o in rows:
         ws.append([
             o["user_id"], fmt_user_name(o["user_id"]), o["type"], o["sub"] or "", o["file"],
@@ -209,12 +242,16 @@ def write_excel_for_range(rows: list) -> BytesIO:
             o["length_cm"] if o["length_cm"] is not None else "",
             o["qty"], o["area"], o["unit_price"], o["price"], o["date"]
         ])
+    total_area = sum(x["area"] for x in rows)
+    total_sum = sum(x["price"] for x in rows)
+    ws.append(["", "", "", "", "", "", "", "", "Jami:", round(total_area, 4), "", int(total_sum), ""])
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
     return bio
 
 def parse_date_pair(s: str):
+    # "YYYY-MM-DD YYYY-MM-DD"
     a, b = s.strip().split()
     d1 = datetime.strptime(a, "%Y-%m-%d")
     d2 = datetime.strptime(b, "%Y-%m-%d")
@@ -229,11 +266,12 @@ def on_start(msg):
     uid = ensure_user_exists(msg)
     note = (
         "📌 <b>Eslatma</b>\n\n"
-        "Fayl yuborilganda <b>fayl nomida</b> o‘lcham va son bo‘lishi <b>shart</b>.\n"
-        "Format:\n"
-        "• Banner/Qora banner/Beklit/Kichik: <code>eni x bo‘yi</code> (sm) va son — masalan: <code>150x200 4ta</code>\n"
-        "• Orakal/Matoviy/Setka (1.07/1.27/1.52): <code>uzunlik</code> (sm) va son — masalan: <code>300 2ta</code>\n"
-        "‼️ O‘lcham <b>sm</b> da yoziladi, lekin hisob <b>metrga</b> aylantirilib (1.50 × 1.70 m kabi) m² bo‘yicha qilinadi.\n"
+        "Fayl yuborilayotganda fayl <b>o‘lchami</b> va <b>soni</b> <u>fayl nomida</u> bo‘lishi shart!\n"
+        "Formatlar:\n"
+        "• Banner/Qora banner/Beklit/Kichik: <code>eni x bo‘yi</code> (sm) va son (masalan: <code>150x200 4ta</code>)\n"
+        "• Orakal/Matoviy/Setka (1.07/1.27/1.52): faqat <code>uzunlik</code> (sm) va son (masalan: <code>300 2ta</code>)\n"
+        "  (Agar nomda eni ham bo‘lsa — e’tiborsiz qoldiriladi)\n\n"
+        "⚠️ Aks holda faylingiz qabul qilinmaydi."
     )
     bot.send_message(uid, note)
 
@@ -261,9 +299,11 @@ def on_contact(msg):
 def on_main_menu(call):
     uid = call.message.chat.id
     cmd = call.data.split(":", 1)[1]
+    # reset user state (aloqa matnini istisno qilamiz)
     user_state[uid] = {"section": None, "sub": None, "await": None}
 
     if cmd == "buyurtma":
+        # sessiyani tozalaymiz
         session_items[uid] = []
         show_order_menu(uid)
     elif cmd == "hisobot":
@@ -278,12 +318,11 @@ def on_main_menu(call):
             return
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("💵 Narxlarni boshqarish", callback_data="a:prices"))
-        kb.add(types.InlineKeyboardButton("🔖 Mijozga xos narx", callback_data="a:userprice"))
         kb.add(types.InlineKeyboardButton("👤 Ismni o‘zgartirish", callback_data="a:rename"))
-        kb.add(types.InlineKeyboardButton("💳 Qarzni tuzatish (+/−)", callback_data="a:debt"))
-        kb.add(types.InlineKeyboardButton("🧾 Ish haqi (kun oralig‘i)", callback_data="a:wage"))
-        kb.add(types.InlineKeyboardButton("📚 Umumiy hisobot (Excel)", callback_data="a:global_report"))
+        kb.add(types.InlineKeyboardButton("📚 Asosiy hisobot", callback_data="a:global_report"))
+        kb.add(types.InlineKeyboardButton("🧾 Ish haqi", callback_data="a:wage"))
         kb.add(types.InlineKeyboardButton("➕ Admin qo‘shish", callback_data="a:add_admin"))
+        kb.add(types.InlineKeyboardButton("🔖 Mijozga xos narx", callback_data="a:userprice"))
         bot.send_message(uid, "⚙️ Admin panel:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("o:"))
@@ -292,13 +331,14 @@ def on_order_section(call):
     section = call.data.split(":")[1]  # banner, qora_banner, ...
     user_state[uid] = {"section": section, "sub": None, "await": None}
 
+    # roll materiallarda sub menyu
     if section in ("orakal", "matoviy_orakal", "setka"):
         show_sub_menu_for_roll(uid, section)
     else:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("📤 Pechatga berish", callback_data="order:finish"))
         bot.send_message(uid,
-            f"📤 <b>{section.replace('_',' ').title()}</b> fayllarini yuboring.\n"
+            f"📤 <b>{section.replace('_',' ').title()}</b> uchun fayllarni yuboring.\n"
             f"Format: <code>eni x bo‘yi</code> (sm) va son (masalan: 150x200 4ta).",
             reply_markup=kb
         )
@@ -313,14 +353,15 @@ def on_order_sub(call):
 
     if sub == "kichik":
         bot.send_message(uid,
-            f"📤 <b>{section.replace('_',' ').title()} → Kichik</b> fayllarini yuboring.\n"
+            f"📤 <b>{section.replace('_',' ').title()} → Kichik</b> uchun fayllarni yuboring.\n"
             f"Format: <code>eni x bo‘yi</code> (sm) va son (masalan: 100x80 3ta).",
             reply_markup=kb
         )
     else:
         bot.send_message(uid,
-            f"📤 <b>{section.replace('_',' ').title()} → {sub}</b> fayllarini yuboring.\n"
-            f"Format: <code>uzunlik</code> (sm) va son (masalan: 300 2ta). Eni kelsa ham e’tiborsiz qoldiriladi.",
+            f"📤 <b>{section.replace('_',' ').title()} → {sub}</b> uchun fayllarni yuboring.\n"
+            f"Format: faqat <code>uzunlik</code> (sm) va son (masalan: 300 2ta). "
+            f"Eni yozilgan bo‘lsa ham e’tiborsiz qoldiriladi.",
             reply_markup=kb
         )
 
@@ -332,11 +373,11 @@ def on_finish_order(call):
         bot.answer_callback_query(call.id, "Buyurtma ro‘yxati bo‘sh.")
         return
 
-    # Excel tayyorla
+    # Excel tayyorlash
     excel = write_excel_for_items(items)
-    caption, _, _ = order_summary_text(items)
+    caption, total_area, total_sum = order_summary_text(items)
 
-    # Yakuniy bazaga yozish
+    # Yakuniy buyurtmalar bazasiga yozish + qarzga qo‘shish
     for rec in items:
         add_final_order_record(uid, rec)
 
@@ -353,17 +394,20 @@ def on_file(msg):
     section = st.get("section")
     sub = st.get("sub")
 
+    # Sektsiya tanlanmagan bo‘lsa
     if not section:
         bot.reply_to(msg, "Avval buyurtma bo‘limini tanlang: /start → 🛒 Buyurtma")
         return
 
+    # Fayl nomi + kengaytma
     if msg.content_type == 'document':
         file_name = msg.document.file_name or "file"
         if not is_image_filename(file_name):
             bot.reply_to(msg, "❌ Faqat JPG/JPEG yoki TIF/TIFF qabul qilinadi.")
             return
     else:
-        bot.reply_to(msg, "❌ Foto (nomisiz) qabul qilinmaydi. Faylni <b>document</b> ko‘rinishida yuboring.")
+        # photo — nom yo'q, hisoblash mumkin emas
+        bot.reply_to(msg, "❌ Rasmni <b>document</b> sifatida yuboring (fayl nomida o‘lcham bo‘lishi shart).")
         return
 
     name_only = file_name.rsplit(".", 1)[0]
@@ -371,37 +415,44 @@ def on_file(msg):
     width_cm, height_cm = parse_wh(name_only)
     length_cm = parse_length(name_only)
 
+    # Hisoblash (sm -> m²) — SIZ TALAB QILGANIDEK: 150x150 => 1.50 x 1.50 m
     try:
         area_m2 = 0.0
-        unit_price = get_effective_price(uid, section)
+
         if section in ("banner", "qora_banner", "beklit"):
+            # eni x bo'yi x qty (sm → m)
             if (width_cm is None) or (height_cm is None):
-                bot.reply_to(msg, "❌ O‘lcham topilmadi. Masalan: <code>150x170 2ta</code> tarzida nomlang.")
+                bot.reply_to(msg, "❌ Fayl nomida <b>eni x bo‘yi</b> (sm) ko‘rsating, masalan: 150x200 4ta")
                 return
             area_m2 = (width_cm / 100.0) * (height_cm / 100.0) * max(1, qty)
 
         elif section in ("orakal", "matoviy_orakal", "setka"):
             if sub == "kichik":
+                # banner kabi (eni x bo'yi)
                 if (width_cm is None) or (height_cm is None):
-                    bot.reply_to(msg, "❌ O‘lcham topilmadi. Masalan: <code>100x80 3ta</code> tarzida nomlang.")
+                    bot.reply_to(msg, "❌ Fayl nomida <b>eni x bo‘yi</b> (sm) ko‘rsating, masalan: 100x80 3ta")
                     return
                 area_m2 = (width_cm / 100.0) * (height_cm / 100.0) * max(1, qty)
             else:
+                # 1.07/1.27/1.52 — ENI sifatida olinadi, faqat UZUNLIK (sm) kerak
                 if sub not in ("1.07", "1.27", "1.52"):
-                    bot.reply_to(msg, "❌ Ichki holat xatosi: tur aniqlanmadi.")
+                    bot.reply_to(msg, "❌ Ichki holat xatosi: noto‘g‘ri tur.")
                     return
                 if length_cm is None:
-                    bot.reply_to(msg, "❌ Uzunlik topilmadi. Masalan: <code>300 2ta</code> tarzida nomlang.")
+                    bot.reply_to(msg, "❌ Fayl nomida <b>uzunlik</b> (sm) ko‘rsating, masalan: 300 2ta")
                     return
-                coef = float(sub)  # eni sifatida 1.07/1.27/1.52 hisoblanadi
-                area_m2 = (length_cm / 100.0) * coef * max(1, qty)
+                coef_width_m = float(sub)   # eni = 1.07/1.27/1.52 metr
+                area_m2 = (length_cm / 100.0) * coef_width_m * max(1, qty)
+                # agar nomda eni ham bo'lsa — e'tiborsiz qoldiriladi (talabingizga binoan)
 
         else:
-            bot.reply_to(msg, "❌ Ichki holat xatosi: bo‘lim aniqlanmadi.")
+            bot.reply_to(msg, "❌ Noto‘g‘ri bo‘lim tanlandi.")
             return
 
+        unit_price = get_effective_price(uid, section)
         total_price = round(area_m2 * unit_price)
 
+        # Sessiyaga qo‘shamiz (hech qanday xabar yubormaymiz — foydalanuvchi finishni bosadi)
         rec = {
             "type": section.replace("_", " ").title(),
             "sub": (sub if section in ("orakal", "matoviy_orakal", "setka") else None),
@@ -416,7 +467,8 @@ def on_file(msg):
             "date": datetime.now().strftime("%Y-%m-%d %H:%M")
         }
         session_items.setdefault(uid, []).append(rec)
-        # Hech qanday xabar yo'q — “Pechatga berish” bosilganda xulosa va Excel ketadi.
+
+        # Hech qanday reply yo'q — "📤 Pechatga berish" bosilganda xulosa + Excel yuboriladi.
 
     except Exception as e:
         bot.reply_to(msg, f"❌ Hisoblashda xatolik: {e}")
@@ -427,17 +479,17 @@ def on_text(msg):
     st = user_state.get(uid, {"section": None, "sub": None, "await": None})
     await_mode = st.get("await")
 
-    # ---- Admin interaktiv amallar ----
+    # --- Adminning muloqotli amallari ---
     if uid in admins and await_mode:
-        # Global narxlarni o'zgartirish
+        # Narxlarni o'zgartirish — tanlash
         if await_mode == "prices_choose_type":
             key = msg.text.strip().lower().replace(" ", "_")
             if key not in prices:
-                bot.reply_to(msg, "Noto‘g‘ri tur. (" + ", ".join(prices.keys()) + ")")
+                bot.reply_to(msg, "Noto‘g‘ri tur. Quyidagilardan birini yozing: " + ", ".join(prices.keys()))
                 return
             user_state[uid]["await"] = "prices_set_value"
             user_state[uid]["_price_key"] = key
-            bot.reply_to(msg, "Yangi narxni yozing (so‘m/m²):")
+            bot.reply_to(msg, f"Yangi narxni yozing (so‘m/m²):")
             return
 
         if await_mode == "prices_set_value":
@@ -447,7 +499,7 @@ def on_text(msg):
                 prices[key] = val
                 bot.reply_to(msg, f"✅ {key.replace('_',' ').title()} narxi yangilandi: {val} so‘m/m²")
             except:
-                bot.reply_to(msg, "Butun son kiriting, masalan: 60000")
+                bot.reply_to(msg, "Butun son kiriting, masalan: 55000")
             user_state[uid]["await"] = None
             user_state[uid].pop("_price_key", None)
             return
@@ -461,7 +513,7 @@ def on_text(msg):
                 else:
                     user_state[uid]["await"] = "rename_ask_name"
                     user_state[uid]["_rename_target"] = target
-                    bot.reply_to(msg, "Yangi nomni yozing (faqat admin ko‘radi):")
+                    bot.reply_to(msg, f"Yangi nomni yozing (faqat admin ko‘radi):")
                 return
             except:
                 bot.reply_to(msg, "Foydalanuvchi ID sini yozing (butun son).")
@@ -475,34 +527,8 @@ def on_text(msg):
             user_state[uid].pop("_rename_target", None)
             return
 
-        # Qarzni tuzatish
-        if await_mode == "debt_ask_userid":
-            try:
-                target = int(msg.text.strip())
-                if target not in users:
-                    bot.reply_to(msg, "Bunday foydalanuvchi topilmadi.")
-                else:
-                    user_state[uid]["await"] = "debt_ask_delta"
-                    user_state[uid]["_debt_target"] = target
-                    curr = debts.get(target, 0)
-                    bot.reply_to(msg, f"Joriy qarz: {curr} so‘m. "
-                                      f"Qarzga qo‘shish (+) yoki kamaytirish (−) summasini yozing, masalan: -50000")
-                return
-            except:
-                bot.reply_to(msg, "Foydalanuvchi ID sini yozing (butun son).")
-                return
-
-        if await_mode == "debt_ask_delta":
-            target = user_state[uid].get("_debt_target")
-            try:
-                delta = int(msg.text.strip())
-                debts[target] = debts.get(target, 0) + delta
-                bot.reply_to(msg, f"✅ Yangilandi. Yangi qarz: {debts[target]} so‘m")
-            except:
-                bot.reply_to(msg, "Butun son kiriting, masalan: -30000 yoki 45000")
-            user_state[uid]["await"] = None
-            user_state[uid].pop("_debt_target", None)
-            return
+        # Qarzni tuzatish (admin paneldan olib tashlandi — lekin kerak bo'lsa qo'shish mumkin)
+        # Bu yerda siz so'ramagansiz, shuning uchun kiritmadim.
 
         # Ish haqi (kun oralig'i)
         if await_mode == "wage_dates":
@@ -555,12 +581,13 @@ def on_text(msg):
             try:
                 val = int(msg.text.strip())
                 if val <= 0:
+                    # o'chiramiz
                     if target in user_price_overrides and key in user_price_overrides[target]:
                         user_price_overrides[target].pop(key, None)
                     bot.reply_to(msg, f"✅ {fmt_user_name(target)} uchun {key} maxsus narx o‘chirildi.")
                 else:
                     user_price_overrides.setdefault(target, {})[key] = val
-                    bot.reply_to(msg, f"✅ {fmt_user_name(target)} uchun {key} narxi {val} so‘m/m² qilindi.")
+                    bot.reply_to(msg, f"✅ {fmt_user_name(target)} uchun {key} narxi {val} so‘m/m² qilib o‘rnatildi.")
             except:
                 bot.reply_to(msg, "Butun son kiriting, masalan: 52000 yoki 0")
             user_state[uid]["await"] = None
@@ -568,76 +595,71 @@ def on_text(msg):
             user_state[uid].pop("_up_type", None)
             return
 
-        # Umumiy hisobot (admin)
+        # Umumiy hisobot (admin) — user/all -> sana oraliq
+        if await_mode == "global_report_who":
+            who = msg.text.strip().lower()
+            user_state[uid]["_report_who"] = who
+            bot.reply_to(msg, "Kun oralig‘ini kiriting: <code>YYYY-MM-DD YYYY-MM-DD</code>")
+            user_state[uid]["await"] = "global_report_range"
+            return
+
         if await_mode == "global_report_range":
             try:
                 d1, d2 = parse_date_pair(msg.text)
+                who = user_state[uid].get("_report_who", "all")
                 rows = []
                 for o in orders:
                     od = datetime.strptime(o["date"], "%Y-%m-%d %H:%M")
                     if d1 <= od <= d2:
-                        rows.append(o)
+                        if who == "all":
+                            rows.append(o)
+                        else:
+                            try:
+                                sel = int(who)
+                                if o["user_id"] == sel:
+                                    rows.append(o)
+                            except:
+                                pass
                 if not rows:
                     bot.reply_to(msg, "Ushbu oraliqda buyurtmalar topilmadi.")
                 else:
                     excel = write_excel_for_range(rows)
-                    bot.send_document(uid, ("hisobot.xlsx", excel), caption=f"📚 {d1.date()} — {d2.date()} umumiy hisobot")
+                    cap = f"📚 Hisobot: {who} | {d1.date()} — {d2.date()}"
+                    bot.send_document(uid, ("hisobot.xlsx", excel), caption=cap)
             except:
                 bot.reply_to(msg, "Format: <code>YYYY-MM-DD YYYY-MM-DD</code>")
             user_state[uid]["await"] = None
+            user_state[uid].pop("_report_who", None)
             return
 
-        # ➕ Admin qo'shish
-        if await_mode == "add_admin_userid":
+        # Admin qo'shish
+        if await_mode == "add_admin_ask_userid":
             try:
-                new_admin_id = int(msg.text.strip())
-                admins.add(new_admin_id)
-                bot.reply_to(msg, f"✅ Yangi admin qo‘shildi: <code>{new_admin_id}</code>")
+                target = int(msg.text.strip())
+                admins.add(target)
+                bot.reply_to(msg, f"✅ Adminlar ro‘yxatiga qo‘shildi: {target}")
             except:
                 bot.reply_to(msg, "Butun son kiriting (foydalanuvchi ID).")
             user_state[uid]["await"] = None
             return
 
-    # ---- Foydalanuvchi rejimlari ----
-    # Hisobot (foydalanuvchi o'ziga)
-    if await_mode == "report_range_user":
-        try:
-            d1, d2 = parse_date_pair(msg.text)
-            rows = []
-            for o in orders:
-                if o["user_id"] != uid:
-                    continue
-                od = datetime.strptime(o["date"], "%Y-%m-%d %H:%M")
-                if d1 <= od <= d2:
-                    rows.append(o)
-            if not rows:
-                bot.reply_to(msg, "Ushbu oraliqda buyurtmalar topilmadi.")
-            else:
-                excel = write_excel_for_range(rows)
-                bot.send_document(uid, ("hisobot.xlsx", excel),
-                                  caption=f"📚 Sizning hisobot: {d1.date()} — {d2.date()}")
-        except:
-            bot.reply_to(msg, "Format: <code>YYYY-MM-DD YYYY-MM-DD</code>")
-        user_state[uid]["await"] = None
-        return
-
-    # Aloqa rejimi: faqat shu holatda matn qabul qilinadi
+    # --- Foydalanuvchi rejimlari ---
+    # Faqat ALOQA rejimida matnni qabul qilamiz; boshqa kontekstlarda matnni o'chiramiz
     if await_mode == "contact_mode":
+        # Adminlarga forward
         for aid in admins:
             try:
                 if aid != uid:
-                    uname = users[uid].get('username', '')
-                    un = f"@{uname}" if uname else ""
-                    bot.send_message(aid, f"📩 {fmt_user_name(uid)} {un} (ID: {uid}):\n{msg.text}")
+                    bot.send_message(aid, f"📩 {fmt_user_name(uid)} (@{users[uid].get('username','')}):\n{msg.text}")
             except:
                 pass
         return
-
-    # Boshqa holatlarda matnni o'chiramiz (chatlashish faqat Aloqa bo‘limida)
-    try:
-        bot.delete_message(uid, msg.message_id)
-    except:
-        pass
+    else:
+        # boshqa bo'limlarda matnni o'chirishga urinib ko'ramiz
+        try:
+            bot.delete_message(uid, msg.message_id)
+        except:
+            pass
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("a:"))
 def on_admin(call):
@@ -663,11 +685,6 @@ def on_admin(call):
         user_state[uid]["await"] = "rename_ask_userid"
         return
 
-    if cmd == "debt":
-        bot.send_message(uid, "Qaysi foydalanuvchi ID sini tanlaysiz? (butun son)")
-        user_state[uid]["await"] = "debt_ask_userid"
-        return
-
     if cmd == "wage":
         bot.send_message(uid, "Kun oraliqni kiriting: <code>YYYY-MM-DD YYYY-MM-DD</code>")
         user_state[uid]["await"] = "wage_dates"
@@ -679,13 +696,13 @@ def on_admin(call):
         return
 
     if cmd == "global_report":
-        bot.send_message(uid, "Kun oralig‘ini kiriting: <code>YYYY-MM-DD YYYY-MM-DD</code>")
-        user_state[uid]["await"] = "global_report_range"
+        bot.send_message(uid, "Kim uchun? <code>all</code> yoki foydalanuvchi ID sini yozing")
+        user_state[uid]["await"] = "global_report_who"
         return
 
     if cmd == "add_admin":
-        bot.send_message(uid, "Yangi adminning foydalanuvchi ID sini kiriting (butun son):")
-        user_state[uid]["await"] = "add_admin_userid"
+        bot.send_message(uid, "Yangi adminning foydalanuvchi ID sini yozing (butun son).")
+        user_state[uid]["await"] = "add_admin_ask_userid"
         return
 
 # ================== WEBHOOK ROUTES ==================
@@ -702,8 +719,11 @@ def telegram_webhook():
 
 @app.route("/", methods=['GET'])
 def index():
-    # Webhook ni har GET da yangilaymiz
-    bot.remove_webhook()
+    # Webhook ni har GET da yangilaymiz (Render health check uchun ham foydali)
+    try:
+        bot.remove_webhook()
+    except:
+        pass
     bot.set_webhook(url=WEBHOOK_URL)
     return "Bot webhook set OK", 200
 
