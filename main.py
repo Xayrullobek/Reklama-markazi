@@ -10,7 +10,7 @@ from telebot import types
 from openpyxl import Workbook
 
 # ================== KONFIG (ENV orqali boshqariladi) ==================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8428384522:AAE0bMRykoO3Edyw6R7Y1oGYN36ViM-2Qk0")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7518059950:AAHk86-0Qv9jljSh79VB8WRB3sw8BZZHvBg")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "6988170724"))
 
 # Render URL: https://APPNAME.onrender.com (ENVga o'zingnikini qo'y)
