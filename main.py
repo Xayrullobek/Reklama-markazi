@@ -442,7 +442,7 @@ def on_file(msg):
                     bot.reply_to(msg, "❌ Fayl nomida <b>uzunlik</b> (sm) ko‘rsating, masalan: 300 2ta")
                     return
                 coef_width_m = float(sub)   # eni = 1.07/1.27/1.52 metr
-                area_m2 = (length_cm / 100.0) * coef_width_m * max(1, qty)
+                area_m2 = (length_cm / 1000.0) * coef_width_m * max(1, qty)
                 # agar nomda eni ham bo'lsa — e'tiborsiz qoldiriladi (talabingizga binoan)
 
         else:
