@@ -1,0 +1,1 @@
+### Bu yerda yangilangan 700 qatorlik kod joylashgan bo'ladi (parse_wh va banner hisoblash tuzatildi). ###
